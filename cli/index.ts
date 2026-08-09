@@ -355,7 +355,7 @@ async function main() {
   else if (NET_CMDS.has(cmd))    action = parseNetworkCommand(filtered)
   else if (SS_CMDS.has(cmd))     action = parseScreenshotCommand(filtered)
   else if (DATA_CMDS.has(cmd))   action = parseDataCommand(filtered)
-  else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode)
+  else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode, globalContextId)
   else if (EVAL_CMDS.has(cmd))   action = parseEvalCommand(filtered)
   else if (SAVE_CMDS.has(cmd))   action = parseSaveCommand(filtered)
   else if (BRAND_CMDS.has(cmd))  action = parseBrandCommand(filtered)
