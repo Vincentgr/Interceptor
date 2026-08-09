@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   claimContextId,
+  contextDescriptor,
   contextConflictMessage,
   contextRegisteredMessage,
   type ContextSocket,
@@ -29,6 +30,21 @@ describe("context name uniqueness guard", () => {
     expect(wsA.__contextId).toBe("work")
   })
 
+  test("records the stable browser-profile instance identity", () => {
+    const map = new Map<string, ContextSocket>()
+    const wsA = socket()
+
+    const result = claimContextId(map, wsA, "atlas", "atlas-instance")
+
+    expect(result.status).toBe("registered")
+    expect(wsA.__contextInstanceId).toBe("atlas-instance")
+    expect(contextDescriptor("atlas", wsA)).toEqual({
+      contextId: "atlas",
+      instanceId: "atlas-instance",
+      kind: "browser",
+    })
+  })
+
   test("rejects a different socket claiming the same name", () => {
     const map = new Map<string, ContextSocket>()
     const wsA = socket()
@@ -43,6 +59,21 @@ describe("context name uniqueness guard", () => {
       message: contextConflictMessage("work"),
     })
     expect(map.get("work")).toBe(wsA)
+    expect(wsB.__contextId).toBeUndefined()
+  })
+
+  test("rejects one browser-profile instance claiming two context names", () => {
+    const map = new Map<string, ContextSocket>()
+    const wsA = socket()
+    const wsB = socket()
+
+    claimContextId(map, wsA, "atlas", "atlas-instance")
+    const result = claimContextId(map, wsB, "renamed-atlas", "atlas-instance")
+
+    expect(result.status).toBe("conflict")
+    if (result.status !== "conflict") throw new Error("expected instance conflict")
+    expect(result.message.error).toContain("browser profile instance 'atlas-instance'")
+    expect(map.has("renamed-atlas")).toBe(false)
     expect(wsB.__contextId).toBeUndefined()
   })
 

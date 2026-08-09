@@ -395,6 +395,7 @@ Recording (Session Monitor):
 
 Meta:
   interceptor contexts                       List IDs of all connected browser contexts (use with --context)
+  interceptor contexts --details [--json]    Include stable per-profile instance IDs for verified routing
   interceptor init                           First-run preflight: verify daemon, bridge, and extension are reachable
   interceptor init --verbose                 Same as 'init', plus a per-component reachability breakdown
   interceptor status                         Check daemon status (local — no connection needed)

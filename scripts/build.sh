@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 
 TARGET="host"
 BUILD_ALL=0
+BUILD_MODE=""
 ORIG_MANIFEST_VERSION=""
 ORIG_NATIVE_BUILD_CONFIG=""
 
@@ -12,9 +13,25 @@ for arg in "$@"; do
   case "$arg" in
     --target=*) TARGET="${arg#--target=}" ;;
     --all) BUILD_ALL=1 ;;
+    --browser-only)
+      if [[ "$BUILD_MODE" == "full" ]]; then
+        echo "ERROR: --browser-only and --full are mutually exclusive." >&2
+        exit 1
+      fi
+      BUILD_MODE="browser-only"
+      ;;
+    --full)
+      if [[ "$BUILD_MODE" == "browser-only" ]]; then
+        echo "ERROR: --browser-only and --full are mutually exclusive." >&2
+        exit 1
+      fi
+      BUILD_MODE="full"
+      ;;
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
+
+BUILD_MODE="${BUILD_MODE:-full}"
 
 stamp_version() {
   local sha date pkg_version platform_targets agent_dylibs_bundled
@@ -280,13 +297,13 @@ if [[ "$BUILD_ALL" == "1" ]]; then
   build_host
   build_macos
   build_windows
-  build_bridge
+  [[ "$BUILD_MODE" == "browser-only" ]] || build_bridge
 elif [[ "$TARGET" == "host" ]]; then
   build_host
-  build_bridge
+  [[ "$BUILD_MODE" == "browser-only" ]] || build_bridge
 elif [[ "$TARGET" == "macos" ]]; then
   build_macos
-  build_bridge
+  [[ "$BUILD_MODE" == "browser-only" ]] || build_bridge
 elif [[ "$TARGET" == "windows" ]]; then
   build_windows
 else
@@ -335,7 +352,7 @@ elif [[ "$TARGET" == "windows" ]]; then
 else
   echo "  CLI:       dist/interceptor"
   echo "  Daemon:    daemon/interceptor-daemon"
-  if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ "$(uname -s)" == "Darwin" && "$BUILD_MODE" != "browser-only" ]]; then
     echo "  Bridge:    dist/interceptor-bridge"
   fi
 fi

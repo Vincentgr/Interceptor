@@ -297,11 +297,26 @@ async function main() {
 
   if (cmd === "contexts") {
     try {
-      const response = await sendCommand({ type: "contexts" }, undefined, undefined)
+      const details = filtered.includes("--details")
+      const response = await sendCommand({ type: details ? "context_details" : "contexts" }, undefined, undefined)
       const result = response.result
       if (!result.success) {
         console.error(`error: ${result.error || "failed to list browser contexts"}`)
         process.exit(1)
+      }
+      if (details) {
+        const descriptors = Array.isArray(result.data) ? result.data : []
+        if (jsonMode) {
+          console.log(JSON.stringify(descriptors))
+        } else if (descriptors.length === 0) {
+          console.log("no browser contexts connected")
+        } else {
+          for (const descriptor of descriptors as Array<{ contextId?: string; instanceId?: string; kind?: string }>) {
+            const fields = [descriptor.contextId ?? "?", descriptor.kind ?? "?", descriptor.instanceId ?? "-"]
+            console.log(fields.join("\t"))
+          }
+        }
+        return
       }
       const ids = Array.isArray(result.data) ? result.data as string[] : []
       if (jsonMode) {

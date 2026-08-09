@@ -4780,6 +4780,25 @@ function clearContextConflictBadge(chromeApi) {
   return updateContextBadge(chromeApi, { text: "" });
 }
 
+// extension/src/background/context-identity.ts
+var CONTEXT_INSTANCE_STORAGE_KEY = "contextInstanceId";
+async function getOrCreateContextInstanceId(storage, createId = () => crypto.randomUUID()) {
+  if (!storage)
+    return;
+  try {
+    const stored = await storage.get(CONTEXT_INSTANCE_STORAGE_KEY);
+    if (typeof stored.contextInstanceId === "string" && stored.contextInstanceId.length > 0) {
+      return stored.contextInstanceId;
+    }
+    const instanceId = createId();
+    await storage.set({ contextInstanceId: instanceId });
+    const verified = await storage.get(CONTEXT_INSTANCE_STORAGE_KEY);
+    return verified.contextInstanceId === instanceId ? instanceId : undefined;
+  } catch {
+    return;
+  }
+}
+
 // extension/src/background/safari-native-relay.ts
 var SAFARI_NATIVE_RELAY_APPLICATION_ID = "com.interceptor.safari";
 var SAFARI_NATIVE_RELAY_MESSAGE_TYPE = "interceptor_safari_relay";
@@ -5006,10 +5025,14 @@ function sendWs(msg) {
     return false;
   }
 }
-function sendWsRegistration(ws, contextId) {
+function sendWsRegistration(ws, contextId, instanceId) {
   markWsUnregistered();
   try {
-    ws.send(JSON.stringify({ type: "extension", contextId }));
+    ws.send(JSON.stringify({
+      type: "extension",
+      contextId,
+      ...instanceId ? { instanceId } : {}
+    }));
     return true;
   } catch (err) {
     console.error("ws context registration send error:", err);
@@ -5299,6 +5322,9 @@ async function getOrCreateContextId() {
   } catch {}
   return id;
 }
+function contextInstanceStorage() {
+  return chrome.storage?.local;
+}
 function connectWsChannel() {
   if (safariNativeRelayEnabled) {
     connectSafariNativeRelayChannel();
@@ -5324,6 +5350,7 @@ function connectWsChannel() {
       wsKeepalive = wsStateOnOpen();
       startWsKeepAlive();
       const contextId = await getOrCreateContextId();
+      const instanceId = await getOrCreateContextInstanceId(contextInstanceStorage());
       if (wsChannel !== ws) {
         try {
           ws.close();
@@ -5332,7 +5359,7 @@ function connectWsChannel() {
       }
       if (ws.readyState !== WebSocket.OPEN)
         return;
-      if (!sendWsRegistration(ws, contextId)) {
+      if (!sendWsRegistration(ws, contextId, instanceId)) {
         closeWsForReconnect(ws);
         return;
       }
@@ -5407,9 +5434,13 @@ function registerStorageContextListener() {
     if (!newId || !wsChannel || wsChannel.readyState !== WebSocket.OPEN)
       return;
     const channel = wsChannel;
-    if (!sendWsRegistration(channel, newId)) {
-      closeWsForReconnect(channel);
-    }
+    getOrCreateContextInstanceId(contextInstanceStorage()).then((instanceId) => {
+      if (wsChannel !== channel || channel.readyState !== WebSocket.OPEN)
+        return;
+      if (!sendWsRegistration(channel, newId, instanceId)) {
+        closeWsForReconnect(channel);
+      }
+    });
   });
 }
 
