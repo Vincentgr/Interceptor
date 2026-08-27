@@ -73,10 +73,12 @@ beforeAll(async () => {
       ...process.env,
       INTERCEPTOR_TEMP: workDir,
       INTERCEPTOR_SOCKET_PATH: socketPath,
-      // Ports distinct from the live daemon (19221/19222) so the test never
-      // loses the singleton gate to a real running instance.
-      INTERCEPTOR_IPC_PORT: "19321",
-      INTERCEPTOR_WS_PORT: "19322",
+      // Let the OS allocate private ephemeral ports. A fixed alternate port can
+      // still collide with another isolated Interceptor daemon on developer
+      // machines, causing this test to lose the singleton gate before it ever
+      // creates the Unix socket exercised below.
+      INTERCEPTOR_IPC_PORT: "0",
+      INTERCEPTOR_WS_PORT: "0",
     },
     stdout: "ignore",
     stderr: "ignore",
