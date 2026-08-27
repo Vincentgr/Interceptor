@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import {
   acquireLease,
   backendFor,
   brokerStatus,
+  configureCapacity,
   heartbeatLease,
   initializeBroker,
   leaseEnvironment,
@@ -52,10 +53,61 @@ describe("browser session broker", () => {
     expect(second.backend).toBe("playwright")
     expect(first.sessionName).not.toBe(second.sessionName)
     expect(first.profilePath).not.toBe(second.profilePath)
-    expect(first.locks).toEqual([])
+    expect(first.locks).toContain("capacity:playwright-1")
+    expect(second.locks).toContain("capacity:playwright-2")
     const env = leaseEnvironment(config, first.id, first.token)
     expect(env.PLAYWRIGHT_CLI_SESSION).toBe(first.sessionName!)
     expect(env.PLAYWRIGHT_CLI_PROFILE).toBe(first.profilePath!)
+  })
+
+  test("configures four Brave slots while preserving existing slot identities", () => {
+    const config = fixture()
+    config.brave.slots[0].contextId = "existing-context"
+    config.brave.slots[0].instanceId = "existing-instance"
+
+    configureCapacity(config, { braveSlots: 4, maxPlaywrightSessions: 6 })
+
+    expect(config.playwright.maxSessions).toBe(6)
+    expect(config.brave.slots.map((slot) => slot.id)).toEqual(["brave-1", "brave-2", "brave-3", "brave-4"])
+    expect(config.brave.slots[0].contextId).toBe("existing-context")
+    expect(config.brave.slots[2].ready).toBe(false)
+    expect(() => configureCapacity(config, { braveSlots: 3 })).toThrow("shrinking Brave slots is not supported")
+  })
+
+  test("enforces the Playwright ceiling and clears a matching queue record after retry", () => {
+    const config = fixture()
+    configureCapacity(config, { maxPlaywrightSessions: 2 })
+    const first = acquireLease(config, { task: "public one", sensitivity: "ordinary" })
+    acquireLease(config, { task: "public two", sensitivity: "ordinary" })
+    const retryRequest = { task: "public three", sensitivity: "ordinary" as const, resource: "research-three" }
+
+    expect(() => acquireLease(config, retryRequest)).toThrow("no browser capacity")
+    expect(brokerStatus(config).queue).toHaveLength(1)
+    expect(() => acquireLease(config, retryRequest)).toThrow("no browser capacity")
+    expect(brokerStatus(config).queue).toHaveLength(1)
+
+    releaseLease(config, first.id, first.token)
+    const retried = acquireLease(config, retryRequest)
+    expect(retried.backend).toBe("playwright")
+    expect(brokerStatus(config).queue).toHaveLength(0)
+    expect(brokerStatus(config).capacity.playwright).toEqual({
+      maxSessions: 2,
+      activeSessions: 2,
+      availableSessions: 0,
+    })
+  })
+
+  test("accounts for legacy Playwright leases without capacity locks", () => {
+    const config = fixture()
+    configureCapacity(config, { maxPlaywrightSessions: 2 })
+    const legacy = acquireLease(config, { task: "legacy", sensitivity: "ordinary" })
+    releaseLease(config, legacy.id, legacy.token)
+    legacy.locks = []
+    const leasePath = join(config.root, "state", "leases", `${legacy.id}.json`)
+    writeFileSync(leasePath, JSON.stringify(legacy, null, 2) + "\n")
+
+    acquireLease(config, { task: "new", sensitivity: "ordinary" })
+    expect(() => acquireLease(config, { task: "over", sensitivity: "ordinary" })).toThrow("no browser capacity")
   })
 
   test("leases the two Brave slots exclusively", () => {
@@ -73,6 +125,12 @@ describe("browser session broker", () => {
       task: "third portal", sensitivity: "sensitive", resource: "portal:case-c",
     }, { preflight: ready })).toThrow("no browser capacity")
     expect(brokerStatus(config).queue).toHaveLength(1)
+    expect(brokerStatus(config).capacity.brave).toEqual({
+      totalSlots: 2,
+      readySlots: 2,
+      activeSessions: 2,
+      availableSessions: 0,
+    })
   })
 
   test("account and resource locks prevent conflicting remote edits across backends", () => {

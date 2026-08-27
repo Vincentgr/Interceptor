@@ -7,12 +7,12 @@ profile or editing the same remote account or record at the same time.
 
 | Work | Backend | Isolation |
 |---|---|---|
-| Public, ordinary browsing | Playwright CLI | Unique named session and persistent profile per lease |
-| Authenticated or sensitive browsing | Brave + Interceptor | One of two exclusively leased, non-personal Brave profiles |
+| Public, ordinary browsing | Playwright CLI | Unique named session and persistent profile per lease, bounded by a configurable ceiling |
+| Authenticated or sensitive browsing | Brave + Interceptor | One of a configurable number of exclusively leased, non-personal Brave profiles |
 
 Authentication is a routing boundary, not a convenience flag. Authenticated
 and sensitive leases fail unless the caller names an account or resource lock.
-The two Brave slots never point at Brave's standard user-data root and never
+The Brave slots never point at Brave's standard user-data root and never
 reuse the Default personal profile.
 
 ## State and security
@@ -42,6 +42,19 @@ with status 75; the caller can inspect `status` and retry after the owner releas
 If an owning session is gone, an operator can reclaim a stale lease only by
 supplying its exact ID twice: `reclaim --lease ID --confirm-stale ID`. The command
 refuses leases that have not crossed the TTL.
+
+The default capacity is six ordinary Playwright sessions and two Brave slots.
+Capacity can be increased without replacing existing profiles or leases:
+
+```bash
+browser-broker configure-capacity --max-playwright 6 --brave-slots 4
+```
+
+The Playwright ceiling is enforced with atomic numbered capacity locks. Older
+leases created before capacity locks were introduced are counted during the
+migration, so upgrading cannot temporarily exceed the configured maximum.
+Shrinking the Brave pool is intentionally refused because deleting or retiring
+an authenticated profile is a separate destructive operation.
 
 ## Installation
 
@@ -76,12 +89,14 @@ browser-broker init \
   --ws-port 19422
 ```
 
-Prepare each clean Brave profile after the broker-specific daemon and extension
+Prepare each newly added clean Brave profile after the broker-specific daemon and extension
 have been built for the configured port:
 
 ```bash
 browser-broker prepare-slot --slot brave-1
 browser-broker prepare-slot --slot brave-2
+browser-broker prepare-slot --slot brave-3
+browser-broker prepare-slot --slot brave-4
 ```
 
 Preparation opens a background Brave process with a unique `--user-data-dir`,
@@ -124,6 +139,11 @@ long-running work and always release the exact lease when finished:
 browser-broker heartbeat --lease LEASE_ID --token LEASE_TOKEN
 browser-broker release --lease LEASE_ID --token LEASE_TOKEN
 ```
+
+When an acquisition is blocked, repeated retries replace the prior matching
+queue entry instead of creating duplicates. A successful retry removes the
+matching queue entry automatically. The queue remains an audit/retry record,
+not a background dispatcher; a suspended caller must still retry acquisition.
 
 ## Operational boundary
 

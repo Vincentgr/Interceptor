@@ -35,6 +35,7 @@ export type BrokerConfig = {
   playwright: {
     command: string
     profilesRoot: string
+    maxSessions: number
   }
   brave: {
     appName: string
@@ -80,6 +81,10 @@ export type BrokerStatus = {
   leases: Array<Omit<Lease, "token"> & { stale: boolean; ageSeconds: number }>
   queue: QueueEntry[]
   braveSlots: Array<BraveSlot & { leasedBy?: string }>
+  capacity: {
+    playwright: { maxSessions: number; activeSessions: number; availableSessions: number }
+    brave: { totalSlots: number; readySlots: number; activeSessions: number; availableSessions: number }
+  }
 }
 
 type QueueEntry = {
@@ -167,7 +172,33 @@ export function loadConfig(root?: string): BrokerConfig {
   if (!existsSync(path)) fail(`browser broker is not initialized: ${path}`, 2)
   const config = readJson<BrokerConfig>(path)
   if (config.schema !== "browser-session-broker-config-v1") fail(`unsupported broker config: ${path}`, 2)
+  config.playwright.maxSessions = validateCapacity(
+    config.playwright.maxSessions ?? 6,
+    "max Playwright sessions",
+    1,
+    64,
+  )
   return config
+}
+
+function validateCapacity(value: number, label: string, minimum: number, maximum: number): number {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    fail(`${label} must be an integer between ${minimum} and ${maximum}`, 2)
+  }
+  return value
+}
+
+function braveSlot(root: string, number: number): BraveSlot {
+  const id = `brave-${number}`
+  const profileRoot = join(root, "profiles", "brave", id)
+  ensurePrivateDirectory(profileRoot)
+  return {
+    id,
+    ready: false,
+    profileRoot,
+    profileDirectory: "Profile 1",
+    guardPrefs: join(root, "slots", `${id}.env`),
+  }
 }
 
 export function initializeBroker(options: {
@@ -180,6 +211,8 @@ export function initializeBroker(options: {
   interceptorTemp?: string
   wsPort?: number
   leaseTtlSeconds?: number
+  braveSlots?: number
+  maxPlaywrightSessions?: number
 }): BrokerConfig {
   const root = brokerRoot(options.root)
   const paths = statePaths(root)
@@ -189,18 +222,9 @@ export function initializeBroker(options: {
   const slotsRoot = join(root, "slots")
   ensurePrivateDirectory(profilesRoot)
   ensurePrivateDirectory(slotsRoot)
-  const slots = [1, 2].map((number): BraveSlot => {
-    const id = `brave-${number}`
-    const profileRoot = join(profilesRoot, "brave", id)
-    ensurePrivateDirectory(profileRoot)
-    return {
-      id,
-      ready: false,
-      profileRoot,
-      profileDirectory: "Profile 1",
-      guardPrefs: join(slotsRoot, `${id}.env`),
-    }
-  })
+  const braveSlots = validateCapacity(options.braveSlots ?? 2, "Brave slots", 1, 16)
+  const maxPlaywrightSessions = validateCapacity(options.maxPlaywrightSessions ?? 6, "max Playwright sessions", 1, 64)
+  const slots = Array.from({ length: braveSlots }, (_, index) => braveSlot(root, index + 1))
   const config: BrokerConfig = {
     schema: "browser-session-broker-config-v1",
     root,
@@ -208,6 +232,7 @@ export function initializeBroker(options: {
     playwright: {
       command: options.playwrightCommand || "playwright-cli",
       profilesRoot: join(profilesRoot, "playwright"),
+      maxSessions: maxPlaywrightSessions,
     },
     brave: {
       appName: options.braveAppName || "Brave Browser",
@@ -222,6 +247,43 @@ export function initializeBroker(options: {
   ensurePrivateDirectory(config.playwright.profilesRoot)
   ensurePrivateDirectory(config.brave.temp)
   atomicJson(paths.config, config)
+  return config
+}
+
+export function configureCapacity(config: BrokerConfig, options: {
+  braveSlots?: number
+  maxPlaywrightSessions?: number
+}): BrokerConfig {
+  if (options.braveSlots === undefined && options.maxPlaywrightSessions === undefined) {
+    fail("configure-capacity requires --brave-slots or --max-playwright", 2)
+  }
+  if (options.maxPlaywrightSessions !== undefined) {
+    const maximum = validateCapacity(options.maxPlaywrightSessions, "max Playwright sessions", 1, 64)
+    const active = listJson<Lease>(statePaths(config.root).leases)
+      .filter((lease) => lease.backend === "playwright")
+    if (maximum < active.length) {
+      fail(`cannot reduce max Playwright sessions below ${active.length} active leases`, 2)
+    }
+    const highestActiveCapacityLock = Math.max(0, ...active.flatMap((lease) =>
+      lease.locks
+        .filter((lock) => lock.startsWith("capacity:playwright-"))
+        .map((lock) => Number(lock.slice("capacity:playwright-".length))),
+    ))
+    if (maximum < highestActiveCapacityLock) {
+      fail(`cannot reduce max Playwright sessions below active capacity slot ${highestActiveCapacityLock}`, 2)
+    }
+    config.playwright.maxSessions = maximum
+  }
+  if (options.braveSlots !== undefined) {
+    const requested = validateCapacity(options.braveSlots, "Brave slots", 1, 16)
+    if (requested < config.brave.slots.length) {
+      fail("shrinking Brave slots is not supported; retire profiles explicitly before reducing capacity", 2)
+    }
+    for (let number = config.brave.slots.length + 1; number <= requested; number++) {
+      config.brave.slots.push(braveSlot(config.root, number))
+    }
+  }
+  atomicJson(statePaths(config.root).config, config)
   return config
 }
 
@@ -402,6 +464,7 @@ function defaultPreflight(config: BrokerConfig, slot: BraveSlot): { ok: boolean;
 }
 
 function queueRequest(root: string, request: AcquireOptions, conflicts: string[], now: Date): QueueEntry {
+  removeMatchingQueueRequests(root, request)
   const entry: QueueEntry = {
     schema: "browser-session-broker-queue-v1",
     id: randomUUID(),
@@ -411,6 +474,31 @@ function queueRequest(root: string, request: AcquireOptions, conflicts: string[]
   }
   atomicJson(join(statePaths(root).queue, `${entry.id}.json`), entry)
   return entry
+}
+
+function comparableRequest(request: AcquireOptions): AcquireOptions {
+  return {
+    task: clean(request.task) || "",
+    sensitivity: request.sensitivity,
+    domain: clean(request.domain)?.toLowerCase(),
+    account: clean(request.account)?.toLowerCase(),
+    resource: clean(request.resource)?.toLowerCase(),
+  }
+}
+
+function sameRequest(left: AcquireOptions, right: AcquireOptions): boolean {
+  return JSON.stringify(comparableRequest(left)) === JSON.stringify(comparableRequest(right))
+}
+
+function removeMatchingQueueRequests(root: string, request: AcquireOptions): number {
+  const queuePath = statePaths(root).queue
+  let removed = 0
+  for (const entry of listJson<QueueEntry>(queuePath)) {
+    if (!sameRequest(entry.request, request)) continue
+    rmSync(join(queuePath, `${entry.id}.json`), { force: true })
+    removed++
+  }
+  return removed
 }
 
 export function acquireLease(config: BrokerConfig, raw: AcquireOptions, deps: BrokerDeps = {}): Lease {
@@ -433,10 +521,25 @@ export function acquireLease(config: BrokerConfig, raw: AcquireOptions, deps: Br
   const now = (deps.now || (() => new Date()))()
   const id = randomUUID()
   const token = randomBytes(24).toString("base64url")
-  const candidates: Array<BraveSlot | undefined> = backend === "playwright" ? [undefined] : config.brave.slots
+  const activeLeases = listJson<Lease>(statePaths(config.root).leases)
+  const legacyPlaywrightLeases = activeLeases.filter((lease) =>
+    lease.backend === "playwright"
+    && !lease.locks.some((lock) => lock.startsWith("capacity:playwright-")),
+  ).length
+  const candidates: Array<{ slot?: BraveSlot; capacityLock?: string }> = backend === "playwright"
+    ? Array.from(
+      { length: Math.max(0, config.playwright.maxSessions - legacyPlaywrightLeases) },
+      (_, index) => ({ capacityLock: `capacity:playwright-${index + 1}` }),
+    )
+    : config.brave.slots.map((slot) => ({ slot }))
   const unavailable: string[] = []
 
-  for (const slot of candidates) {
+  if (backend === "playwright" && candidates.length === 0) {
+    unavailable.push(`Playwright capacity ${config.playwright.maxSessions} reached`)
+  }
+
+  for (const candidate of candidates) {
+    const slot = candidate.slot
     if (slot) {
       const preflight = (deps.preflight || defaultPreflight)(config, slot)
       if (!preflight.ok) {
@@ -445,6 +548,7 @@ export function acquireLease(config: BrokerConfig, raw: AcquireOptions, deps: Br
       }
     }
     const locks = requestedLocks(options, slot?.id)
+    if (candidate.capacityLock) locks.unshift(candidate.capacityLock)
     const acquired = acquireLocks(config.root, id, locks)
     if (!acquired.ok) {
       unavailable.push(...acquired.conflicts)
@@ -473,6 +577,7 @@ export function acquireLease(config: BrokerConfig, raw: AcquireOptions, deps: Br
     }
     if (lease.profilePath) ensurePrivateDirectory(lease.profilePath)
     atomicJson(join(statePaths(config.root).leases, `${id}.json`), lease)
+    removeMatchingQueueRequests(config.root, options)
     return lease
   }
 
@@ -561,6 +666,9 @@ export function brokerStatus(config: BrokerConfig, now = new Date()): BrokerStat
     const { token: _token, ...safeLease } = lease
     return { ...safeLease, ageSeconds, stale: ageSeconds > config.leaseTtlSeconds }
   })
+  const activePlaywright = decorated.filter((lease) => lease.backend === "playwright").length
+  const activeBrave = decorated.filter((lease) => lease.backend === "brave-interceptor").length
+  const readyBrave = config.brave.slots.filter((slot) => slot.ready).length
   return {
     root: config.root,
     leases: decorated,
@@ -569,6 +677,19 @@ export function brokerStatus(config: BrokerConfig, now = new Date()): BrokerStat
       ...slot,
       leasedBy: decorated.find((lease) => lease.slotId === slot.id)?.task,
     })),
+    capacity: {
+      playwright: {
+        maxSessions: config.playwright.maxSessions,
+        activeSessions: activePlaywright,
+        availableSessions: Math.max(0, config.playwright.maxSessions - activePlaywright),
+      },
+      brave: {
+        totalSlots: config.brave.slots.length,
+        readySlots: readyBrave,
+        activeSessions: activeBrave,
+        availableSessions: Math.max(0, readyBrave - activeBrave),
+      },
+    },
   }
 }
 
@@ -605,8 +726,9 @@ function help(): string {
   return `browser-broker — lease isolated browser sessions safely
 
 Commands:
-  init --extension-path PATH --guard-script PATH [--root PATH]
-  prepare-slot --slot brave-1|brave-2
+  init --extension-path PATH --guard-script PATH [--root PATH] [--brave-slots N] [--max-playwright N]
+  configure-capacity [--brave-slots N] [--max-playwright N]
+  prepare-slot --slot brave-N
   bind-slot --slot ID --context ID --instance ID [--profile-name NAME]
   acquire --task NAME --sensitivity ordinary|authenticated|sensitive [--domain HOST] [--account ID] [--resource ID]
   env --lease ID --token TOKEN
@@ -620,8 +742,9 @@ Routing:
   authenticated|sensitive One exclusively leased Brave/Interceptor slot
 
 Authenticated and sensitive leases require an account or resource lock. A busy
-request is recorded in the queue and exits with status 75. Stale leases are
-reported but never reclaimed automatically.`
+request is recorded in the queue and exits with status 75. A successful retry
+removes its matching queue record. Stale leases are reported but never reclaimed
+automatically.`
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -639,11 +762,20 @@ async function main(argv: string[]): Promise<void> {
       interceptorTemp: parsed.values.get("interceptor-temp"),
       wsPort: parsed.values.has("ws-port") ? Number(parsed.values.get("ws-port")) : undefined,
       leaseTtlSeconds: parsed.values.has("lease-ttl-seconds") ? Number(parsed.values.get("lease-ttl-seconds")) : undefined,
+      braveSlots: parsed.values.has("brave-slots") ? Number(parsed.values.get("brave-slots")) : undefined,
+      maxPlaywrightSessions: parsed.values.has("max-playwright") ? Number(parsed.values.get("max-playwright")) : undefined,
     })
     console.log(JSON.stringify(config, null, 2))
     return
   }
   const config = loadConfig(root)
+  if (parsed.command === "configure-capacity") {
+    console.log(JSON.stringify(configureCapacity(config, {
+      braveSlots: parsed.values.has("brave-slots") ? Number(parsed.values.get("brave-slots")) : undefined,
+      maxPlaywrightSessions: parsed.values.has("max-playwright") ? Number(parsed.values.get("max-playwright")) : undefined,
+    }), null, 2))
+    return
+  }
   if (parsed.command === "prepare-slot") {
     console.log(JSON.stringify(await prepareBraveSlot(config, required(parsed.values, "slot")), null, 2))
     return
