@@ -397,9 +397,18 @@ export async function prepareBraveSlot(config: BrokerConfig, slotId: string): Pr
   }
   const preferencesPath = join(slot.profileRoot, slot.profileDirectory, "Preferences")
   const securePreferencesPath = join(slot.profileRoot, slot.profileDirectory, "Secure Preferences")
-  for (let attempt = 0; attempt < 20; attempt++) {
-    if (existsSync(preferencesPath) && existsSync(securePreferencesPath)) break
+  const localStatePath = join(slot.profileRoot, "Local State")
+  let profileRegistered = false
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (existsSync(localStatePath) && existsSync(preferencesPath) && existsSync(securePreferencesPath)) {
+      const localState = readJson<{ profile?: { info_cache?: Record<string, { name?: string }> } }>(localStatePath)
+      profileRegistered = Boolean(localState.profile?.info_cache?.[slot.profileDirectory]?.name)
+      if (profileRegistered) break
+    }
     await Bun.sleep(250)
+  }
+  if (!profileRegistered) {
+    fail(`timed out waiting for ${slot.profileDirectory} to register in ${localStatePath}`, 5)
   }
   return bindBraveSlot(config, {
     slotId,
