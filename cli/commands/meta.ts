@@ -26,10 +26,13 @@ type Action = { type: string; [key: string]: unknown }
  * interceptor-group tab. Probe is skipped silently when the daemon isn't
  * running, so `status` stays a true local-pre-spawn check by default.
  */
-async function probeExtensionReachability(): Promise<{ reachable: boolean; reason?: string }> {
+export async function probeExtensionReachability(
+  contextId?: string,
+  transport: typeof sendCommand = sendCommand,
+): Promise<{ reachable: boolean; reason?: string }> {
   try {
     const resp = await Promise.race([
-      sendCommand({ type: "tab_list" }, undefined),
+      transport({ type: "tab_list" }, undefined, contextId),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("probe timed out after 2s")), 2000)
       ),
@@ -48,7 +51,7 @@ async function probeExtensionReachability(): Promise<{ reachable: boolean; reaso
   }
 }
 
-export async function parseMetaCommand(filtered: string[], jsonMode = false): Promise<Action | null> {
+export async function parseMetaCommand(filtered: string[], jsonMode = false, contextId?: string): Promise<Action | null> {
   const cmd = filtered[0]
 
   switch (cmd) {
@@ -76,7 +79,7 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false): Pr
       // Extension-reachability probe (#49) — verbose-only, daemon-alive-only.
       // Stays a true local-pre-spawn check otherwise.
       if (verbose && snap.daemon) {
-        const probe = await probeExtensionReachability()
+        const probe = await probeExtensionReachability(contextId)
         snap.extension = { probed: true, ...probe }
       } else if (verbose && !snap.daemon) {
         snap.extension = { probed: false, reachable: false, reason: "daemon not running" }

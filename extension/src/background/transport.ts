@@ -3,6 +3,7 @@ import { safeNativePortDisconnect, safeNativePortPing, safeNativePortPost, shoul
 import { recoverPendingRequestsAfterNativeDisconnect } from "./pending-request-recovery"
 import { INITIAL_RECONNECT_DELAY_MS, delayWithJitter, nextReconnectDelay } from "./reconnect-lifecycle"
 import { clearContextConflictBadge, registrationControlType, setContextConflictBadge } from "./context-registration"
+import { getOrCreateContextInstanceId, type ContextInstanceStorage } from "./context-identity"
 import { SafariNativeRelayClient, type SafariNativeRelayRuntime } from "./safari-native-relay"
 
 type ActiveTransport = "none" | "native" | "websocket" | "safari-native"
@@ -139,10 +140,14 @@ function sendWs(msg: unknown): boolean {
   }
 }
 
-function sendWsRegistration(ws: WebSocket, contextId: string): boolean {
+function sendWsRegistration(ws: WebSocket, contextId: string, instanceId?: string): boolean {
   markWsUnregistered()
   try {
-    ws.send(JSON.stringify({ type: "extension", contextId }))
+    ws.send(JSON.stringify({
+      type: "extension",
+      contextId,
+      ...(instanceId ? { instanceId } : {}),
+    }))
     return true
   } catch (err) {
     console.error("ws context registration send error:", err)
@@ -482,6 +487,12 @@ async function getOrCreateContextId(): Promise<string> {
   return id
 }
 
+function contextInstanceStorage(): ContextInstanceStorage | undefined {
+  return (chrome as unknown as {
+    storage?: { local?: ContextInstanceStorage }
+  }).storage?.local
+}
+
 export function connectWsChannel(): void {
   if (safariNativeRelayEnabled) {
     connectSafariNativeRelayChannel()
@@ -507,12 +518,13 @@ export function connectWsChannel(): void {
       wsKeepalive = wsStateOnOpen()
       startWsKeepAlive()
       const contextId = await getOrCreateContextId()
+      const instanceId = await getOrCreateContextInstanceId(contextInstanceStorage())
       if (wsChannel !== ws) {
         try { ws.close() } catch {}
         return
       }
       if (ws.readyState !== WebSocket.OPEN) return
-      if (!sendWsRegistration(ws, contextId)) {
+      if (!sendWsRegistration(ws, contextId, instanceId)) {
         closeWsForReconnect(ws)
         return
       }
@@ -589,9 +601,12 @@ export function registerStorageContextListener(): void {
     if (typeof newId !== "string" || newId.length === 0) return
     if (!newId || !wsChannel || wsChannel.readyState !== WebSocket.OPEN) return
     const channel = wsChannel
-    if (!sendWsRegistration(channel, newId)) {
-      closeWsForReconnect(channel)
-    }
+    void getOrCreateContextInstanceId(contextInstanceStorage()).then((instanceId) => {
+      if (wsChannel !== channel || channel.readyState !== WebSocket.OPEN) return
+      if (!sendWsRegistration(channel, newId, instanceId)) {
+        closeWsForReconnect(channel)
+      }
+    })
   })
 }
 

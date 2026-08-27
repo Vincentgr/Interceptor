@@ -8,6 +8,7 @@ import { dirname } from "node:path"
 import { validateBinarySinkPath, binarySinkIntegrityError } from "./binary-sink"
 import { osClick, osKey, osType, osMove, generateBezierPath, translateCoords } from "./os-input-loader"
 import { IS_WIN, SOCKET_PATH, IPC_PORT, PID_PATH, LOCK_PATH, LOG_PATH, EVENTS_PATH, WS_PORT, EVENTS_MAX_SIZE, MAX_UPLOAD_FRAME_BYTES, transportLabel } from "../shared/platform"
+import { isProcessAlive } from "../shared/process-liveness"
 import {
   MONITOR_EVENT_NAMES,
   appendSessionEvent,
@@ -18,9 +19,9 @@ import {
   updateSessionMeta,
 } from "../shared/monitor-artifacts"
 import { chooseOutboundTransport, isRelayPing, relaySlotAfterClose, validateContextRouting } from "./outbound-routing"
-import { claimContextId, type ContextSocket } from "./context-registration"
+import { claimContextId, contextDescriptor, type ContextSocket } from "./context-registration"
 import { formatBridgeUnavailableError, getBridgeRecoveryActions, getBridgeRecoveryLayout } from "./bridge-recovery"
-import { clearDaemonRuntimeFiles, clearLockFile, decideDaemonStartupRole, decideSingletonGate, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon, writeLockFile } from "./lifecycle"
+import { clearDaemonRuntimeFiles, clearOwnedDaemonRuntimeFiles, decideDaemonStartupRole, decideSingletonGate, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon, writeLockFile } from "./lifecycle"
 import { VERSION } from "../cli/version"
 import { CdpManager, CDP_ACTION_TYPES } from "./cdp/manager"
 import { CDP_CONTEXT_PREFIX } from "../shared/cdp-app"
@@ -69,8 +70,7 @@ function isBridgeAlive(): boolean {
   try {
     const pid = parseInt(readFileSync(BRIDGE_PID_PATH, "utf-8").trim())
     if (isNaN(pid)) return false
-    process.kill(pid, 0)
-    return true
+    return isProcessAlive(pid)
   } catch { return false }
 }
 
@@ -1354,6 +1354,15 @@ try {
             continue
           }
 
+          if (action?.type === "context_details") {
+            const browser = [...extensionWsMap.entries()].map(([contextId, contextSocket]) =>
+              contextDescriptor(contextId, contextSocket as ContextSocket))
+            const cdp = cdpManager.contextIds().map((contextId) => ({ contextId, kind: "cdp" }))
+            const ios = iosManager.contextIds().map((contextId) => ({ contextId, kind: "ios" }))
+            socketWriteFramed(socket, JSON.stringify({ id, result: { success: true, data: [...browser, ...cdp, ...ios] } }))
+            continue
+          }
+
           // Runtime Agent surface: list connected in-process agents.
           if (action?.type === "native_status") {
             socketWriteFramed(socket, JSON.stringify({ id, result: { success: true, data: [...nativeAgentMeta.values()] } }))
@@ -1536,7 +1545,7 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
         }
         const rawStr = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf-8")
         log(`ws recv: ${rawStr.slice(0, 300)}`)
-        let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; type?: string; result?: unknown }
+        let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; instanceId?: string; type?: string; result?: unknown }
         try {
           request = JSON.parse(rawStr)
         } catch {
@@ -1558,7 +1567,7 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
 
         if (request.type === "extension") {
           const ctxId = request.contextId ?? "default"
-          const claim = claimContextId(extensionWsMap, ws as ContextSocket, ctxId)
+          const claim = claimContextId(extensionWsMap, ws as ContextSocket, ctxId, request.instanceId)
           ws.send(JSON.stringify(claim.message))
           if (claim.status === "conflict") {
             return
@@ -1777,18 +1786,14 @@ function gracefulShutdown(signal: string) {
     socketServer = null
   }
   if (wsServer) wsServer.stop(true)
-  try { unlinkSync(SOCKET_PATH) } catch {}
-  try { unlinkSync(PID_PATH) } catch {}
-  try { clearLockFile(LOCK_PATH) } catch {}
+  clearOwnedDaemonRuntimeFiles(lifecycleDeps(), `${signal} shutdown`)
   log("shutdown complete")
   process.exit(0)
 }
 
 process.on("exit", (code) => {
   log(`exiting with code ${code}`)
-  try { unlinkSync(SOCKET_PATH) } catch {}
-  try { unlinkSync(PID_PATH) } catch {}
-  try { clearLockFile(LOCK_PATH) } catch {}
+  clearOwnedDaemonRuntimeFiles(lifecycleDeps(), `exit ${code}`)
 })
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"))
 process.on("SIGINT", () => gracefulShutdown("SIGINT"))

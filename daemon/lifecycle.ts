@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
+import { isProcessAlive } from "../shared/process-liveness"
 
 export type PidState =
   | { status: "missing"; pid: null }
@@ -106,12 +107,9 @@ export function readPidState(deps: Pick<LifecycleDeps, "existsSync" | "readFileS
   if (!pid) return { status: "invalid", pid: null }
   if (pid === deps.currentPid) return { status: "current", pid }
 
-  try {
-    deps.kill(pid, 0)
-    return { status: "alive", pid }
-  } catch {
-    return { status: "stale", pid }
-  }
+  return isProcessAlive(pid, deps.kill)
+    ? { status: "alive", pid }
+    : { status: "stale", pid }
 }
 
 export function clearDaemonRuntimeFiles(deps: Pick<LifecycleDeps, "unlinkSync" | "pidPath" | "lockPath" | "socketPath" | "isWin" | "log">, reason: string): void {
@@ -121,6 +119,21 @@ export function clearDaemonRuntimeFiles(deps: Pick<LifecycleDeps, "unlinkSync" |
   }
   try { deps.unlinkSync(deps.pidPath) } catch {}
   try { deps.unlinkSync(deps.lockPath) } catch {}
+}
+
+export function clearOwnedDaemonRuntimeFiles(
+  deps: Pick<LifecycleDeps, "existsSync" | "readFileSync" | "unlinkSync" | "kill" | "currentPid" | "pidPath" | "lockPath" | "socketPath" | "isWin" | "log">,
+  reason: string,
+): boolean {
+  const state = readPidState(deps)
+  if (state.status !== "current") {
+    const owner = state.pid === null ? state.status : `${state.status} pid ${state.pid}`
+    deps.log(`preserving daemon runtime files: ${reason}; owner is ${owner}`)
+    return false
+  }
+
+  clearDaemonRuntimeFiles(deps, reason)
+  return true
 }
 
 export function decideDaemonStartupRole(standalone: boolean, state: PidState): StartupDecision {

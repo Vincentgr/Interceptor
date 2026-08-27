@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "./scripts/build.sh",
+    "build:browser-broker": "bun build --compile scripts/browser-session-broker.ts --outfile dist/browser-broker",
+    "browser-broker": "bun run scripts/browser-session-broker.ts",
     "typecheck": "bunx tsc -p tsconfig.host.json && bunx tsc -p tsconfig.extension.json && bunx tsc -p tsconfig.json",
     "test": "bun test",
     "audit:capability-blind": "bash scripts/audit-capability-blind.sh",
@@ -16,6 +18,7 @@
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.9.0",
+    "@playwright/cli": "0.1.18",
     "@types/bun": "^1.3.14",
     "@types/chrome": "^0.1.43",
     "happy-dom": "^20.9.0",

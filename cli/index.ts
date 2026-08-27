@@ -297,11 +297,26 @@ async function main() {
 
   if (cmd === "contexts") {
     try {
-      const response = await sendCommand({ type: "contexts" }, undefined, undefined)
+      const details = filtered.includes("--details")
+      const response = await sendCommand({ type: details ? "context_details" : "contexts" }, undefined, undefined)
       const result = response.result
       if (!result.success) {
         console.error(`error: ${result.error || "failed to list browser contexts"}`)
         process.exit(1)
+      }
+      if (details) {
+        const descriptors = Array.isArray(result.data) ? result.data : []
+        if (jsonMode) {
+          console.log(JSON.stringify(descriptors))
+        } else if (descriptors.length === 0) {
+          console.log("no browser contexts connected")
+        } else {
+          for (const descriptor of descriptors as Array<{ contextId?: string; instanceId?: string; kind?: string }>) {
+            const fields = [descriptor.contextId ?? "?", descriptor.kind ?? "?", descriptor.instanceId ?? "-"]
+            console.log(fields.join("\t"))
+          }
+        }
+        return
       }
       const ids = Array.isArray(result.data) ? result.data as string[] : []
       if (jsonMode) {
@@ -340,7 +355,7 @@ async function main() {
   else if (NET_CMDS.has(cmd))    action = parseNetworkCommand(filtered)
   else if (SS_CMDS.has(cmd))     action = parseScreenshotCommand(filtered)
   else if (DATA_CMDS.has(cmd))   action = parseDataCommand(filtered)
-  else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode)
+  else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode, globalContextId)
   else if (EVAL_CMDS.has(cmd))   action = parseEvalCommand(filtered)
   else if (SAVE_CMDS.has(cmd))   action = parseSaveCommand(filtered)
   else if (BRAND_CMDS.has(cmd))  action = parseBrandCommand(filtered)

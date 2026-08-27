@@ -1,7 +1,14 @@
 export type ContextSocket = {
   send: (data: string) => void
   __contextId?: string
+  __contextInstanceId?: string
   __native?: boolean
+}
+
+export type ContextDescriptor = {
+  contextId: string
+  instanceId?: string
+  kind: "browser" | "runtime"
 }
 
 export type ContextConflictMessage = {
@@ -43,10 +50,19 @@ export function contextRegisteredMessage(contextId: string): ContextRegisteredMe
   }
 }
 
+export function contextDescriptor(contextId: string, socket: ContextSocket): ContextDescriptor {
+  return {
+    contextId,
+    ...(socket.__contextInstanceId ? { instanceId: socket.__contextInstanceId } : {}),
+    kind: contextId.startsWith("runtime:") ? "runtime" : "browser",
+  }
+}
+
 export function claimContextId(
   contextMap: Map<string, ContextSocket>,
   ws: ContextSocket,
   contextId: string,
+  instanceId?: string,
 ): ContextClaimResult {
   const existing = contextMap.get(contextId)
   if (existing && existing !== ws) {
@@ -57,12 +73,29 @@ export function claimContextId(
     }
   }
 
+  if (instanceId) {
+    for (const [claimedContextId, claimedSocket] of contextMap.entries()) {
+      if (claimedSocket !== ws && claimedSocket.__contextInstanceId === instanceId) {
+        return {
+          status: "conflict",
+          contextId,
+          message: {
+            type: "context_conflict",
+            contextId,
+            error: `browser profile instance '${instanceId}' is already registered as context '${claimedContextId}'`,
+          },
+        }
+      }
+    }
+  }
+
   const previousContextId = ws.__contextId
   if (previousContextId && previousContextId !== contextId && contextMap.get(previousContextId) === ws) {
     contextMap.delete(previousContextId)
   }
 
   ws.__contextId = contextId
+  if (instanceId) ws.__contextInstanceId = instanceId
   contextMap.set(contextId, ws)
 
   return {

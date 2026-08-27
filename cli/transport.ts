@@ -3,10 +3,39 @@
  */
 
 import { IPC_PORT, IS_WIN, SOCKET_PATH, WS_PORT, MAX_UPLOAD_FRAME_BYTES } from "../shared/platform"
+import { existsSync } from "node:fs"
 import { IOS_SVC_ACTION_TYPES } from "../shared/ios-service"
 import { IOS_DEV_ACTION_TYPES } from "../shared/ios-dev"
 
 export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT || "15000")
+
+export type DaemonConnectErrorOptions = {
+  isWin: boolean
+  socketPath: string
+  socketExists: boolean
+}
+
+export function daemonConnectErrorMessage(
+  error: Error & { code?: string },
+  options: DaemonConnectErrorOptions = {
+    isWin: IS_WIN,
+    socketPath: SOCKET_PATH,
+    socketExists: !IS_WIN && existsSync(SOCKET_PATH),
+  },
+): string {
+  const detail = [error.code, error.message]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .join(": ")
+  const suffix = detail ? ` (${detail})` : ""
+
+  if (!options.isWin && options.socketExists) {
+    return `daemon socket exists but this process cannot connect to ${options.socketPath}. The execution sandbox or local permissions may be blocking IPC${suffix}. Re-run through an approved outside-sandbox command; do not restart the daemon based on this error alone.`
+  }
+
+  const endpoint = options.isWin ? "the local daemon TCP endpoint" : options.socketPath
+  return `daemon is not reachable at ${endpoint}${suffix}. Open Chrome/Brave with the Interceptor extension loaded, then retry.`
+}
 
 // Speech permission prompts are async and user-bounded; 15s is too short
 // for first-time `listen start` / `vad start`. 60s covers the documented
@@ -216,9 +245,9 @@ export function sendCommand(rawAction: Action, tabId?: number, contextId?: strin
           reject(new Error("connection closed before response"))
         }
       },
-      connectError(_socket: Bun.Socket<undefined>, _err: Error) {
+      connectError(_socket: Bun.Socket<undefined>, err: Error & { code?: string }) {
         clearTimeout(timer)
-        reject(new Error("daemon not running. Open Chrome with the Interceptor extension loaded."))
+        reject(new Error(daemonConnectErrorMessage(err)))
       },
       error(_socket: Bun.Socket<undefined>, err: Error) {
         clearTimeout(timer)
